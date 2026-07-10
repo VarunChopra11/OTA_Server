@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 _STATE_SUBSCRIBE = "smarthome/device/+/state"
 _REGISTER_TOPIC = "smarthome/register"
+_STATUS_SUBSCRIBE = "smarthome/device/+/status"
 _CMD_TOPIC_TEMPLATE = "smarthome/device/{mac}/cmd"
 
 
@@ -119,9 +120,10 @@ class MQTTService:
 
                     await client.subscribe(_STATE_SUBSCRIBE, qos=1)
                     await client.subscribe(_REGISTER_TOPIC, qos=1)
+                    await client.subscribe(_STATUS_SUBSCRIBE, qos=1)
                     logger.info(
-                        "mqtt_bridge_subscribed state=%s register=%s",
-                        _STATE_SUBSCRIBE, _REGISTER_TOPIC,
+                        "mqtt_bridge_subscribed state=%s register=%s status=%s",
+                        _STATE_SUBSCRIBE, _REGISTER_TOPIC, _STATUS_SUBSCRIBE,
                     )
 
                     async with asyncio.TaskGroup() as tg:
@@ -145,6 +147,8 @@ class MQTTService:
             try:
                 if topic_str == _REGISTER_TOPIC:
                     await self._handle_registration_message(message.payload)
+                elif topic_str.endswith("/status"):
+                    await self._handle_status_message(topic_str, message.payload)
                 else:
                     await self._handle_state_message(topic_str, message.payload)
             except Exception as exc:  # noqa: BLE001
@@ -306,6 +310,48 @@ class MQTTService:
             logger.warning(
                 "mqtt_registration_mac_already_claimed mac=%s",
                 mac,
+            )
+
+    # -------------------------------------------------------------------------
+    # Status message handler  (smarthome/device/<mac>/status)
+    # -------------------------------------------------------------------------
+
+    async def _handle_status_message(self, topic: str, payload: bytes | str) -> None:
+        """Process an MQTT connection status message (online/offline) from an ESP32 or LWT."""
+        parts = topic.split("/")
+        if len(parts) != 4:
+            logger.warning("mqtt_unexpected_status_topic topic=%s", topic)
+            return
+
+        mac = parts[2]
+        try:
+            if isinstance(payload, (bytes, bytearray)):
+                payload = payload.decode("utf-8")
+            status_str = payload.strip().lower()
+        except UnicodeDecodeError as exc:
+            logger.warning("mqtt_invalid_status_payload topic=%s error=%s", topic, exc)
+            return
+
+        if status_str == "online":
+            is_online = True
+        elif status_str == "offline":
+            is_online = False
+        else:
+            logger.warning("mqtt_invalid_status mac=%s status=%r", mac, status_str)
+            return
+
+        if self._db is None:
+            logger.error("mqtt_no_db — cannot persist status")
+            return
+
+        from app.repositories.smarthome_device_repository import SmartHomeDeviceRepository
+
+        repo = SmartHomeDeviceRepository(self._db)
+        updated = await repo.update_device_online_status(mac, is_online)
+        if not updated:
+            logger.warning(
+                "mqtt_status_unmatched mac=%s status=%s — device not found in db",
+                mac, is_online,
             )
 
 

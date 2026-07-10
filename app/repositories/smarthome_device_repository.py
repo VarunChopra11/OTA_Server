@@ -52,6 +52,7 @@ class SmartHomeDeviceRepository:
             "name": name,
             "device_model": device_model,
             "endpoints": endpoints_with_state,
+            "online": False,
             "created_at": now,
             "updated_at": now,
         }
@@ -104,6 +105,25 @@ class SmartHomeDeviceRepository:
             logger.debug(
                 "smarthome_state_updated mac=%s endpoint=%s value=%s",
                 mac, endpoint_id, value,
+            )
+        return updated
+
+    async def update_device_online_status(self, mac: str, online: bool) -> bool:
+        """Update the device's online status in MongoDB."""
+        result = await self.collection.update_one(
+            {"mac": mac},
+            {
+                "$set": {
+                    "online": online,
+                    "updated_at": datetime.now(UTC),
+                }
+            },
+        )
+        updated = result.matched_count > 0
+        if updated:
+            logger.info(
+                "smarthome_online_updated mac=%s online=%s",
+                mac, online,
             )
         return updated
 

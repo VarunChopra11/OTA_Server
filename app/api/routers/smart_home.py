@@ -150,13 +150,14 @@ async def _handle_query(
         dev = SmartHomeDeviceDoc.from_doc(doc)
         state_dict = dev.get_state_dict()
         valid_ids = dev.get_endpoint_ids()
-
+        is_online = bool(doc.get("online", False))
+ 
         for device_id, endpoint_id in pairs:
             if endpoint_id not in valid_ids:
                 device_states[device_id] = {"online": False, "errorCode": "deviceNotFound"}
             else:
                 device_states[device_id] = {
-                    "online": True,
+                    "online": is_online,
                     "on": state_dict.get(endpoint_id, False),
                 }
 
@@ -199,7 +200,8 @@ async def _handle_execute(
             target_on: bool = bool(cmd_params.get("on", False))
             success_ids: list[str] = []
             error_ids: list[str] = []
-
+            offline_ids: list[str] = []
+ 
             for d in target_devices:
                 device_id: str = d.get("id", "")
                 try:
@@ -207,37 +209,52 @@ async def _handle_execute(
                 except ValueError:
                     error_ids.append(device_id)
                     continue
-
+ 
                 doc = await device_repo.get_by_mac(mac)
                 if not doc or str(doc.get("user_id")) != user_id:
                     error_ids.append(device_id)
                     continue
-
+ 
                 # Validate endpoint exists on this specific device
                 dev = SmartHomeDeviceDoc.from_doc(doc)
                 if endpoint_id not in dev.get_endpoint_ids():
                     error_ids.append(device_id)
                     continue
-
+ 
                 await mqtt_service.publish_command(mac, endpoint_id, target_on)
                 # NOTE: No optimistic DB update here.  MongoDB is updated
                 # strictly when the ESP32 publishes its confirmed state back
                 # via MQTT (handled in mqtt_service.py).  Writing the assumed
                 # state here would leave the DB out of sync if the device is
                 # offline or drops the message.
-
-                success_ids.append(device_id)
-                logger.info(
-                    "fulfillment_execute mac=%s endpoint=%s on=%s user_id=%s",
-                    mac, endpoint_id, target_on, user_id,
-                )
-
+ 
+                is_online = bool(doc.get("online", False))
+                if is_online:
+                    success_ids.append(device_id)
+                    logger.info(
+                        "fulfillment_execute mac=%s endpoint=%s on=%s user_id=%s",
+                        mac, endpoint_id, target_on, user_id,
+                    )
+                else:
+                    offline_ids.append(device_id)
+                    logger.info(
+                        "fulfillment_execute_offline mac=%s endpoint=%s on=%s user_id=%s (enqueued)",
+                        mac, endpoint_id, target_on, user_id,
+                    )
+ 
             if success_ids:
                 results.append(
                     {
                         "ids": success_ids,
                         "status": "SUCCESS",
                         "states": {"on": target_on, "online": True},
+                    }
+                )
+            if offline_ids:
+                results.append(
+                    {
+                        "ids": offline_ids,
+                        "status": "OFFLINE",
                     }
                 )
             if error_ids:
